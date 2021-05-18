@@ -1,0 +1,455 @@
+---
+title: "Update Fibrosis Atlas"
+author: "Lukas Tombor"
+date: "5/5/2021"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+## Load packages and dataset
+
+```{r}
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(tidyverse)
+library(reshape2)
+library(knitr)
+library(kableExtra)
+library(Matrix)
+library(ggpubr)
+library(harmony)
+library(tictoc)
+library(enrichR)
+
+setwd("/media/tombor/Helios_scStorage/Lukas/Analysis/For other projects/Fibrosis_Nuno/Analysis/Update_05_05_21")
+
+load("/media/tombor/Helios_scStorage/Lukas/Analysis/For other projects/Fibrosis_Nuno/Analysis/Building Atlas/Fibroblasts_Seurat.Rds")
+
+load("/media/tombor/Helios_scStorage/Lukas/Analysis/For other projects/Fibrosis_Nuno/Analysis/Building Atlas/Harmonized_Fibrosis_all_cells.Rds")
+
+Seurat_all$Timepoint <- ifelse(Seurat_all$Sample_name == "21dpi", "Late", Seurat_all$Timepoint)
+
+Fbs$Timepoint <- ifelse(Fbs$Sample_name == "21dpi", "Late", Fbs$Timepoint)
+
+SEM<- function(x){
+  return(sd(x)/sqrt(length(x)))
+}
+```
+
+# Remove Hepatic Stellar cells (Cluster 0) from analysis and cluster again
+
+```{r}
+Idents(Fbs) <- "seurat_clusters"
+Fbs_filtered <- subset(Fbs, subset = seurat_clusters != "0")
+
+Fbs_filtered <- NormalizeData(Fbs_filtered)
+Fbs_filtered <- FindVariableFeatures(Fbs_filtered, selection.method = "vst", nfeatures = 2000)
+head(VariableFeatures(object = Fbs_filtered))
+Fbs_filtered <- ScaleData(Fbs_filtered)
+Fbs_filtered <- RunPCA(Fbs_filtered)
+
+
+Fbs_filtered <- RunHarmony(Fbs_filtered, "Sample_name", plot_convergence = T)
+
+Fbs_filtered <- RunUMAP(Fbs_filtered, reduction = "harmony", dims = 1:50)
+Fbs_filtered <- FindNeighbors(Fbs_filtered, reduction = "harmony", dims = 1:50)
+Fbs_filtered <- FindClusters(Fbs_filtered, resolution = 0.4)
+  
+DimPlot(Fbs_filtered, label = T)
+
+Idents(Fbs_filtered) <- "Tissue"
+DimPlot(Fbs_filtered)
+
+Idents(Fbs_filtered) <- "Timepoint"
+DimPlot(Fbs_filtered)
+
+save(Fbs_filtered, file = "Fibroblasts_filtered_Seurat.Rds")
+```
+
+## Run distinct on Clusters (FC calc didnt work)
+
+```{r}
+SC <- function(object){
+  object <- NormalizeData(object, scale.factor = 1e6, normalization.method = "RC")
+  X <- Seurat::as.SingleCellExperiment(object)
+  X@metadata <- object@meta.data
+  return(X)
+}
+
+Fbs_filtered$Sample_name <- as.factor(Fbs_filtered$Sample_name)
+Fbs_filtered$Timepoint <- factor(Fbs_filtered$Timepoint, levels = c("Homeostasis", "Early", "Late"))
+Fbs_filtered$Tissue <- as.factor(Fbs_filtered$Tissue)
+
+Fbs.SCE <- SC(Fbs_filtered)
+
+df <- Fbs_filtered@meta.data %>% group_by(Sample_name, Tissue) %>% summarise()
+
+samples = factor(unlist(df[, "Sample_name"]))
+group = factor(unlist(df[, "seurat_clusters"]))
+batch = factor(unlist(df[, "Tissue"]))
+
+design = model.matrix(~batch)
+rownames(design) = samples
+design
+
+res = distinct_test(x = Fbs.SCE, 
+                    name_assays_expression = "logcounts",
+                    name_sample = "Sample_name",
+                    name_cluster = "seurat_clusters",
+                    design = design,
+                    column_to_test = 2,
+                    min_non_zero_cells = 20,
+                    n_cores = 20, 
+                    P_4 = 10000)
+res <- res %>% filter(p_adj.glb < 0.05)
+
+FC = log2_FC(res, x = Fbs.SCE, name_assays_expression = "logcounts", name_group = "seurat_clusters", name_cluster = "seurat_clusters")
+
+write.table(FC, file ="distinct_output.csv", row.names = F, sep = ";")
+```
+
+# MAST Test between baseline tissue types
+
+```{r}
+Baseline <- subset(Fbs_filtered, subset = Timepoint == "Homeostasis")
+
+Idents(Fb_filtered) <- "Timepoint"
+
+Timepoint.all.markers <- FindAllMarkers(Fb_filtered, logfc.threshold = .1, test.use = "MAST", only.pos = T)
+
+Idents(Baseline) <- "Tissue"
+
+Tissue.baseline.markers <- FindAllMarkers(Baseline, logfc.threshold = .1, test.use = "MAST", only.pos = T)
+
+Idents(Fbs_filtered) <- "Tissue"
+
+Tissue.markers <- FindAllMarkers(subset(Fbs_filtered, Timepoint != "Homeostasis"), logfc.threshold = .1, test.use = "MAST", only.pos = T)
+
+Liver <- subset(Fbs_filtered, subset = Tissue == "Liver")
+Idents(Liver) <- "Timepoint"
+
+Liver.markers <- FindAllMarkers(Liver, logfc.threshold = .1, test.use = "MAST", only.pos = T)
+
+Heart <- subset(Fbs_filtered, subset = Tissue == "Heart")
+
+Idents(Heart) <- "Timepoint"
+
+Heart.markers <- FindAllMarkers(Heart, logfc.threshold = .1, test.use = "MAST", only.pos = T)
+
+
+Skeletal.muscle <- subset(Fbs_filtered, subset = Tissue == "Skeletal muscle")
+
+Idents(Skeletal.muscle) <- "Timepoint"
+
+Skeletal.muscle.markers <- FindAllMarkers(Skeletal.muscle, logfc.threshold = .1, test.use = "MAST", only.pos = T)
+
+Lung <- subset(Fbs_filtered, subset = Tissue == "Lung")
+
+Idents(Lung) <- "Timepoint"
+Lung.markers <- FindAllMarkers(Lung, logfc.threshold = .1, test.use = "MAST", only.pos = T)
+
+Tests <- c("Timepoint.all.markers", "Tissue.markers", "Tissue.baseline.markers", "Liver.markers", "Heart.markers", "Skeletal.muscle.markers", "Lung.markers")
+
+for(i in Tests){
+  X <- get(i)
+  X <- X %>% filter(p_val_adj < 0.01)
+  assign(i,X)
+}
+
+# Which genes are specific for baseline differences in tissue
+# Genes: Early and Late timepoints between tissue - baseline between tissue
+'%!in%' <- function(x,y)!('%in%'(x,y))
+
+Tissue.baseline.markers$Group_Gene <- paste(Tissue.baseline.markers$cluster, Tissue.baseline.markers$gene, sep = "_")
+
+Tissue.markers$Group_Gene <- paste(Tissue.markers$cluster, Tissue.markers$gene, sep = "_")
+
+Candidates <- NULL
+for(i in rownames(Tissue.baseline.markers)){
+  g <- Tissue.baseline.markers[i,"gene"]
+  sub <- subset(Tissue.markers, gene == g)
+  sub2 <- subset(Tissue.baseline.markers, gene == g)
+  if(length(rownames(sub2)) != 1){}
+  else if(g %!in% Tissue.markers$gene){Candidates[i] <- g}
+  else if(Tissue.baseline.markers[i,"Group_Gene"] %!in% sub$Group_Gene){Candidates[i] <- g}
+  else if(Tissue.baseline.markers[i,"avg_logFC"]-subset(sub, Group_Gene == Tissue.baseline.markers[i,"Group_Gene"])[,"avg_logFC"] > 0.8){Candidates[i] <- g}
+}
+
+Clean_Tissue.baseline.markers <- Tissue.baseline.markers %>% filter(gene %in% Candidates)
+
+Top_candidates <- Clean_Tissue.baseline.markers  %>% group_by(cluster) %>% top_n(avg_logFC, n= 25)
+G.t.p <- Top_candidates$gene
+Tisue_G.t.p <- as.character(Top_candidates$cluster)
+
+h <- hash::hash(keys = G.t.p, values = Tisue_G.t.p)
+
+A <- data.frame(Tissue = Baseline$Tissue)
+
+for(i in G.t.p){
+  A[,i] <- Baseline@assays$RNA@data[i, ]
+}
+
+A.melt <- melt(A)
+
+A.sum <- A.melt %>% group_by(Tissue, variable) %>% summarize(Mean = mean(value)) %>% ungroup() %>% group_by(variable) %>% mutate(scaled_Mean = scale(Mean))
+
+Group = NULL
+for(i in 1:length(rownames(A.sum))){
+  Group = c(Group, h[[as.character(A.sum$variable[i])]])
+}
+A.sum$Group <- as.factor(Group)
+
+A.sum$scaled_Mean_f <- cut(A.sum$scaled_Mean, breaks = c(-1.5, -0.75, -0.5, -0.25, 0, .25, .5, .75, 1, 1.5))
+
+A.sum$scaled_Mean_f <- factor(A.sum$scaled_Mean_f, levels = rev(levels(A.sum$scaled_Mean_f)))
+
+ggplot(A.sum, aes(x = Tissue, y = reorder(variable, desc(variable)), fill = scaled_Mean_f))+
+  geom_tile(color = "black")+
+  scale_fill_manual(values = RColorBrewer::brewer.pal(11, "RdBu"))+
+  facet_wrap(~Group, ncol = 4, scales = "free")+
+  theme_classic()+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(y = "Gene", x = "Tissue", title = "Top_marker genes baseline")
+                           
+                           
+```
+
+# Common markers regulated over time
+
+```{r}
+Common.early <- intersect(subset(Skeletal.muscle.markers, cluster == "Early")[,"gene"], subset(Heart.markers, cluster == "Early")[,"gene"])
+Common.early <- intersect(Common.early, subset(Liver.markers, cluster == "Early")[,"gene"])
+
+Clean.early <- Timepoint.all.markers %>% filter(gene %in% Common.early)
+Candidate.early <- Clean.early %>% top_n(avg_logFC, n= 50)
+Gene.early <- Candidate.early$gene
+
+Common.late <- intersect(subset(Skeletal.muscle.markers, cluster == "Late")[,"gene"], subset(Heart.markers, cluster == "Late")[,"gene"])
+Common.late <- intersect(Common.late, subset(Liver.markers, cluster == "Late")[,"gene"])
+Common.late <- intersect(Common.late, subset(Lung.markers, cluster == "Late")[,"gene"])
+
+Clean.late <- Timepoint.all.markers %>% filter(gene %in% Common.late)
+Candidate.late <- Clean.late %>% top_n(avg_logFC, n= 50)
+Gene.late <- Candidate.late$gene
+
+A <- data.frame(Tissue = Fbs_filtered$Tissue, Timepoint = Fbs_filtered$Timepoint)
+
+for(i in Gene.late){
+  A[,i] <- Fbs_filtered@assays$RNA@data[i, ]
+}
+
+A.melt <- melt(A)
+
+A.sum <- A.melt %>% group_by(Tissue, Timepoint, variable) %>% summarize(Mean = mean(value)) %>% ungroup() %>% group_by(Tissue, variable) %>% mutate(scaled_Mean = scale(Mean))
+
+A.sum$scaled_Mean_f <- cut(A.sum$scaled_Mean, breaks = c(-1.7, -0.75, -0.5, -0.25, 0, .25, .5, .75, 1, 1.7))
+
+A.sum$scaled_Mean_f <- factor(A.sum$scaled_Mean_f, levels = rev(levels(A.sum$scaled_Mean_f)))
+
+A.sum <- A.sum[complete.cases(A.sum), ]
+
+ggplot(A.sum, aes(x = Timepoint, y = reorder(variable, desc(variable)), fill = scaled_Mean_f))+
+  geom_tile(color = "black")+
+  scale_fill_manual(values = RColorBrewer::brewer.pal(11, "RdBu"))+
+  facet_wrap(~Tissue, ncol = 4, scales = "free")+
+  theme_classic()+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(y = "Gene", x = "Tissue", title = "Common Marker for Late Timepoints")
+```
+
+# Tissue specific markers Early/Late for Heart
+
+```{r}
+# Genes in Heart but not in other tissue comps and also not in baseline
+
+Heart.early <- Heart.markers %>% filter(cluster == "Early")
+Skeletal.early <- Skeletal.muscle.markers %>% filter(cluster == "Early")
+Liver.early <- Liver.markers %>% filter(cluster == "Early")
+
+Heart.specific <- Tissue.markers %>% filter(cluster == "Heart")
+
+gs1 <- union(Skeletal.early$gene, Liver.early$gene)
+gs1 <- union(gs1, Heart.specific$gene)
+Heart.early <- Heart.early %>% filter(gene %!in% gs1)
+
+Gene.heart.early <- Heart.early$gene
+
+A <- data.frame(Tissue = Fbs_filtered$Tissue, Timepoint = Fbs_filtered$Timepoint)
+
+for(i in Gene.heart.early){
+  A[,i] <- Fbs_filtered@assays$RNA@data[i, ]
+}
+
+A.melt <- melt(A)
+
+A.sum <- A.melt %>% group_by(Tissue, Timepoint, variable) %>% summarize(Mean = mean(value)) %>% ungroup() %>% group_by(Tissue, variable) %>% mutate(scaled_Mean = scale(Mean))
+
+A.sum$scaled_Mean_f <- cut(A.sum$scaled_Mean, breaks = c(-1.7, -0.75, -0.5, -0.25, 0, .25, .5, .75, 1, 1.7))
+
+A.sum$scaled_Mean_f <- factor(A.sum$scaled_Mean_f, levels = rev(levels(A.sum$scaled_Mean_f)))
+
+A.sum <- A.sum[complete.cases(A.sum), ]
+
+ggplot(A.sum, aes(x = Timepoint, y = reorder(variable, desc(variable)), fill = scaled_Mean_f))+
+  geom_tile(color = "black")+
+  scale_fill_manual(values = RColorBrewer::brewer.pal(11, "RdBu"))+
+  facet_wrap(~Tissue, ncol = 4, scales = "free")+
+  theme_classic()+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(y = "Gene", x = "Tissue", title = "Specific markers for heart early")
+
+```
+
+
+### Kinetics #### 
+```{r}
+# Genes on X chromosome
+library(biomaRt)
+ensembl <- useMart("ensembl")
+ensembl = useDataset("mmusculus_gene_ensembl",mart=ensembl)
+X.genes <- getBM(ensembl, attributes = c("mgi_symbol", "chromosome_name"), filters = "chromosome_name", values = "X")
+X.genes <- unique(X.genes$mgi_symbol)
+
+Hom.Early.Late.Test <- function(x){
+Ti <- get(x)
+Idents(Ti) <- "Timepoint"
+if(x == "Skeletal.muscle"){
+  All <- subset(Seurat_all, subset = Tissue == "Skeletal muscle" & Celltype != "Fibroblasts")
+Idents(All) <- "Timepoint"
+}
+else{
+All <- subset(Seurat_all, subset = Tissue == x & Celltype != "Fibroblasts")
+Idents(All) <- "Timepoint"
+}
+Hom.Late <- FindMarkers(Ti, ident.1 = "Homeostasis", ident.2 = "Late", test.use = "MAST", logfc.threshold = 0.1)
+Hom.Late <- filter(Hom.Late, p_val_adj < .01)
+Hom.Late$Gene <- rownames(Hom.Late)
+Hom.Late$Tissue <- rep(x, times = nrow(Hom.Late))
+Hom.Late$Test <- rep("Hom.Late", times = nrow(Hom.Late))
+Hom.Late$Group <- ifelse(Hom.Late$avg_logFC < 0, "Late", "Hom")
+Hom.Late$Paste <- paste(Hom.Late$Tissue,Hom.Late$Group, sep = "_")
+
+All.Hom.Late <- FindMarkers(All, ident.1 = "Homeostasis", ident.2 = "Late", test.use = "MAST", logfc.threshold = 0.1)
+All.Hom.Late <- filter(All.Hom.Late, p_val_adj < .01)
+All.Hom.Late$Gene <- rownames(All.Hom.Late)
+All.Hom.Late$Group <- ifelse(All.Hom.Late$avg_logFC < 0, "Late", "Hom")
+All.Hom.Late$Paste <- paste(All.Hom.Late$Tissue,All.Hom.Late$Group, sep = "_")
+
+Hom.Late <- filter(Hom.Late, Paste %!in% All.Hom.Late$Paste)
+
+Hom.Early <- FindMarkers(Ti, ident.1 = "Homeostasis", ident.2 = "Early", test.use = "MAST", logfc.threshold = 0.1)
+Hom.Early <- filter(Hom.Early, p_val_adj < .01)
+Hom.Early$Gene <- rownames(Hom.Early)
+Hom.Early$Tissue <- rep(x, times = nrow(Hom.Early))
+Hom.Early$Test <- rep("Hom.Early", times = nrow(Hom.Early))
+Hom.Early$Group <- ifelse(Hom.Early$avg_logFC < 0, "Early", "Hom")
+Hom.Early$Paste <- paste(Hom.Early$Tissue,Hom.Early$Group, sep = "_")
+
+All.Hom.Early <- FindMarkers(All, ident.1 = "Homeostasis", ident.2 = "Early", test.use = "MAST", logfc.threshold = 0.1)
+All.Hom.Early <- filter(All.Hom.Early, p_val_adj < .01)
+All.Hom.Early$Gene <- rownames(All.Hom.Early)
+All.Hom.Early$Group <- ifelse(All.Hom.Early$avg_logFC < 0, "Early", "Hom")
+All.Hom.Early$Paste <- paste(All.Hom.Early$Tissue,All.Hom.Early$Group, sep = "_")
+
+Hom.Early <- filter(Hom.Early, Paste %!in% All.Hom.Early$Paste)
+
+
+Early.Late <- FindMarkers(Ti, ident.1 = "Early", ident.2 = "Late", test.use = "MAST", logfc.threshold = 0.1)
+Early.Late <- filter(Early.Late, p_val_adj < .01)
+Early.Late$Gene <- rownames(Early.Late)
+Early.Late$Tissue <- rep(x, times = nrow(Early.Late))
+Early.Late$Test <- rep("Early.Late", times = nrow(Early.Late))
+Early.Late$Group <- ifelse(Early.Late$avg_logFC < 0, "Late", "Early")
+Early.Late$Paste <- paste(Early.Late$Tissue,Early.Late$Group, sep = "_")
+
+All.Early.Late <- FindMarkers(All, ident.1 = "Early", ident.2 = "Late", test.use = "MAST", logfc.threshold = 0.1)
+All.Early.Late <- filter(All.Early.Late, p_val_adj < .01)
+All.Early.Late$Gene <- rownames(All.Early.Late)
+All.Early.Late$Group <- ifelse(All.Early.Late$avg_logFC < 0, "Early", "Hom")
+All.Early.Late$Paste <- paste(All.Early.Late$Tissue,All.Early.Late$Group, sep = "_")
+
+Early.Late <- filter(Early.Late, Paste %!in% All.Early.Late$Paste)
+
+Join <- full_join(Hom.Early, Hom.Late)
+Join <- full_join(Join, Early.Late)
+
+Join <- filter(Join, Gene %!in% X.genes)
+
+return(Join)
+}
+
+Tissues <- c("Heart", "Liver", "Skeletal.muscle")
+
+for(Ti in Tissues){
+X <- Hom.Early.Late.Test(Ti)
+name <- paste(Ti, "marker", sep = "_")
+assign(name, X)
+}
+
+All_cmps <- full_join(Heart_marker, Liver_marker)
+All_cmps <- full_join(All_cmps, Skeletal.muscle_marker)
+
+Crossings <- crossing(Hom.Early = c("Hom", "Early", "no"), Early.Late = c("Early", "Late", "no"), Hom.Late = c("Hom", "Late", "no"))
+
+Crossings$Pattern <- seq_along(Crossings$Hom.Early)
+
+Dcast <- dcast(All_cmps, formula = Tissue + Gene ~ Test, value.var = "Group")
+
+Dcast[is.na(Dcast)] <- "no"
+
+Dcast <- left_join(Dcast, Crossings)
+
+All_join <- right_join(All_cmps, Dcast)
+
+UMI.df <- as.data.frame(t(Fbs_filtered@assays$RNA@data[All_join$Gene, ]))
+
+UMI <- data.frame(UMI.df, Tissue = Fbs_filtered$Tissue, Timepoint = Fbs_filtered$Timepoint)
+
+UMI.melt <- melt(UMI)
+
+UMI.sum <- UMI.melt %>% group_by(Tissue, Timepoint, variable) %>% summarize(Mean = mean(value), SEM = SEM(value))
+
+UMI.sum <- UMI.sum[complete.cases(UMI.sum), ]
+
+UMI.dcast <- dcast(UMI.sum, formula = Tissue + variable ~ Timepoint, value.var = "Mean")
+colnames(UMI.dcast)[2] <- "Gene"
+
+UMI.dcast$Tissue <- ifelse(UMI.dcast$Tissue == "Skeletal muscle", "Skeletal.muscle",UMI.dcast$Tissue)
+
+All_join_UMI <- full_join(All_join, UMI.dcast)
+All_join_UMI <- All_join_UMI[complete.cases(All_join_UMI), ]
+
+All_join_UMI$Generalized.Pattern <- ifelse(All_join_UMI$Pattern %in% c(1,2,3), "Transient Up Early", 
+                                    ifelse(All_join_UMI$Pattern == 5, "Increased to Late",
+                                    ifelse(All_join_UMI$Pattern %in% c(8,9), "Higher Early and Late",
+                                    ifelse(All_join_UMI$Pattern == 10 , "Decreased to Late",
+                                    ifelse(All_join_UMI$Pattern %in% c(13,14,15), "Transient Down Early",
+                                    ifelse(All_join_UMI$Pattern %in% c(16, 18), "Lower in Early and Late", 
+                                    ifelse(All_join_UMI$Pattern == 19, "Higher in Homeoastasis and Early", "Unclear")))))))
+
+df.top <- All_join_UMI %>% group_by(Generalized.Pattern) %>% top_n(n = 10, wt = abs(avg_logFC))
+
+df.top.melt <- melt(df.top, measure.vars = c("Homeostasis", "Early", "Late"))
+df.top.melt$variable <- factor(df.top.melt$variable, levels = c("Homeostasis", "Early", "Late"))
+
+df.top.melt <- df.top.melt %>% group_by(Tissue, Gene) %>% mutate(Norm.Mean = value/value[variable == "Homeostasis"])
+
+df.plot <- data.frame(Gene = df.top.melt$Gene, Timepoint = df.top.melt$variable, Normalized.Mean = df.top.melt$Norm.Mean, Generalized.Pattern = df.top.melt$Generalized.Pattern)
+
+df.plot <- unique(df.plot)
+df.plot$Gene <- as.factor(df.plot$Gene)
+
+ggplot(df.plot, aes(x = Timepoint, y = Normalized.Mean, group = Gene))+
+  geom_path()+
+  facet_wrap(~Generalized.Pattern, scales = "free", nrow = 2)+
+  theme_classic()+
+  labs(title = "Different Patterns in Kinetics", y = "UMI normalized to Homeostasis")
+
+Short.df <- unique(data.frame(Gene = All_join_UMI$Gene, Tissue = All_join_UMI$Tissue, Generalized.Pattern = All_join_UMI$Generalized.Pattern))
+
+Gene.pattern.count <- dcast(Short.df, formula = Gene ~ Tissue, value.var = "Generalized.Pattern")
+
+```
+
